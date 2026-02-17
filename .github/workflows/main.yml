@@ -24,7 +24,7 @@ jobs:
         Start-Service sshd
         Set-Service -Name sshd -StartupType 'Automatic'
         
-        # Configure firewall rule with correct error handling
+        # Configure firewall rule
         Write-Host "🔒 Configuring firewall..." -ForegroundColor Green
         $firewallRule = Get-NetFirewallRule -DisplayName "OpenSSH Server (sshd)" -ErrorAction SilentlyContinue
         if (-not $firewallRule) {
@@ -43,7 +43,7 @@ jobs:
     - name: Configure SSH Access
       shell: pwsh
       run: |
-        # Generate a random password (special characters removed for compatibility)
+        # Generate a random password
         $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         $password = -join ((1..12) | ForEach-Object { Get-Random -Minimum 0 -Maximum $chars.length | ForEach-Object { $chars[$_] } })
         
@@ -70,7 +70,14 @@ jobs:
           $config = $config -replace '^#?\s*PasswordAuthentication\s+yes', 'PasswordAuthentication yes'
           
           # Ensure the line exists
-          $hasPasswordAuth = $config -match '^PasswordAuthentication\s+yes'
+          $hasPasswordAuth = $false
+          foreach ($line in $config) {
+            if ($line -match '^PasswordAuthentication\s+yes') {
+              $hasPasswordAuth = $true
+              break
+            }
+          }
+          
           if (-not $hasPasswordAuth) {
             $config += "`nPasswordAuthentication yes"
           }
@@ -155,10 +162,14 @@ jobs:
           }
         }
         
+        # FIXED: Calculate end time properly without inline expression
+        $startTime = Get-Date
+        $endTime = $startTime.AddHours(6)
+        
         Write-Host "`n⏱️  SESSION INFORMATION:" -ForegroundColor White
         Write-Host "  • Max runtime: 6 hours" -ForegroundColor Magenta
-        Write-Host "  • Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Magenta
-        Write-Host "  • Will end: $(Get-Date).AddHours(6) 'yyyy-MM-dd HH:mm:ss'" -ForegroundColor Magenta
+        Write-Host "  • Started: $($startTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Magenta
+        Write-Host "  • Will end: $($endTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Magenta
         
         Write-Host "`n⚠️  IMPORTANT NOTES:" -ForegroundColor Red
         Write-Host "  • Save this password now! It won't be shown again: $env:SSH_PASSWORD" -ForegroundColor Yellow
@@ -178,8 +189,8 @@ Password: $env:SSH_PASSWORD
 
 Connection Command: ssh $env:USERNAME@$publicIP
 
-Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-Expires: $(Get-Date).AddHours(6) 'yyyy-MM-dd HH:mm:ss'
+Started: $($startTime.ToString('yyyy-MM-dd HH:mm:ss'))
+Expires: $($endTime.ToString('yyyy-MM-dd HH:mm:ss'))
 "@
         $infoContent | Out-File -FilePath "$env:TEMP\ssh_server_info.txt" -Encoding utf8
         Write-Host "`n📁 Connection info saved to: $env:TEMP\ssh_server_info.txt" -ForegroundColor Gray
@@ -189,7 +200,7 @@ Expires: $(Get-Date).AddHours(6) 'yyyy-MM-dd HH:mm:ss'
       run: |
         Write-Host "`n🔄 SSH SERVER IS NOW RUNNING" -ForegroundColor Green
         Write-Host "⏳ This job will stay active for up to 6 hours" -ForegroundColor Yellow
-        Write-Host "💡 Press Ctrl+C in the runner to stop early (not recommended)" -ForegroundColor Yellow
+        Write-Host "💡 To stop early: Cancel this workflow in GitHub Actions UI" -ForegroundColor Yellow
         Write-Host ""
         
         $startTime = Get-Date
