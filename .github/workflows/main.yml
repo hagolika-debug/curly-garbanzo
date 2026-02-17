@@ -1,40 +1,40 @@
-name: SSH via Cloudflare
+name: SSH via Cloudflare (Auto Format)
 on: workflow_dispatch
 
 jobs:
-  ssh:
+  ssh-server:
     runs-on: ubuntu-latest
     steps:
-      - name: Set up SSH Password
+      - name: Configure SSH
         run: |
+          # Set the password
           echo "runner:Pass1234" | sudo chpasswd
-          # Enable Password Authentication in SSH config
-          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          # Ensure SSH allows password login
           sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo systemctl restart ssh
 
       - name: Install Cloudflared
         run: |
-          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
 
-      - name: Start Cloudflare Tunnel
-        id: tunnel
+      - name: Start Tunnel and Format Output
         run: |
-          # Start tunnel and log the output to a file to grab the URL
+          # Start tunnel in background
           nohup cloudflared tunnel --url tcp://localhost:22 > tunnel.log 2>&1 &
-          sleep 10
-          grep -o 'https://[-a-z0-9.]*trycloudflare.com' tunnel.log | head -n 1 > url.txt
-          echo "TUNNEL_URL=$(cat url.txt)" >> $GITHUB_ENV
-          echo "Your SSH URL is: $(cat url.txt)"
-
+          
+          # Wait for the URL to generate
+          sleep 12
+          
+          # Extract the hostname (removes https:// and any trailing slashes)
+          RAW_URL=$(grep -o 'https://[-a-z0-9.]*trycloudflare.com' tunnel.log | head -n 1)
+          CLEAN_HOST=$(echo $RAW_URL | sed 's/https:\/\///')
+          
+          echo "------------------------------------------------------------"
+          echo "COPY AND PASTE INTO HTTP CUSTOM:"
+          echo "------------------------------------------------------------"
+          echo "$CLEAN_HOST:443@runner:Pass1234"
+          echo "------------------------------------------------------------"
+          
       - name: Keep Alive
-        run: |
-          echo "------------------------------------------------------------"
-          echo "CONNECT VIA HTTP CUSTOM USING:"
-          echo "Host: ${{ env.TUNNEL_URL }}"
-          echo "Port: 443 (Cloudflare uses 443 for the tunnel entry)"
-          echo "User: runner"
-          echo "Pass: Pass1234"
-          echo "------------------------------------------------------------"
-          sleep 21600
+        run: sleep 21600 # Keeps the server up for 6 hours
