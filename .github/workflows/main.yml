@@ -1,9 +1,7 @@
 name: Windows SSH Server
 
 on:
-  workflow_dispatch:  # Manual trigger
-  # push:
-  #   branches: [ main ]  # Optional: trigger on push
+  workflow_dispatch:  # Manual trigger only
 
 jobs:
   windows-ssh:
@@ -17,55 +15,108 @@ jobs:
       shell: powershell
       run: |
         # Install OpenSSH Server if not present
+        Write-Host "Installing OpenSSH Server..." -ForegroundColor Green
         Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
         
         # Start and configure SSH service
+        Write-Host "Starting SSH service..." -ForegroundColor Green
         Start-Service sshd
         Set-Service -Name sshd -StartupType 'Automatic'
         
-        # Confirm firewall rule exists
-        if (!(Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyIgnore)) {
+        # Confirm firewall rule exists (fixed error handling)
+        Write-Host "Configuring firewall..." -ForegroundColor Green
+        $firewallRule = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
+        if (!$firewallRule) {
           New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+          Write-Host "Firewall rule created" -ForegroundColor Green
+        } else {
+          Write-Host "Firewall rule already exists" -ForegroundColor Yellow
         }
     
     - name: Configure SSH Access
       shell: powershell
       run: |
-        # Set password for current user (change 'YourPassword123!' to something secure)
-        $Password = ConvertTo-SecureString "anasshed123!" -AsPlainText -Force
-        Set-LocalUser -Name $env:USERNAME -Password $Password
+        # Generate a random password
+        $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%"
+        $password = -join ((1..12) | ForEach {Get-Random -Maximum $chars.length | ForEach {$chars[$_]}})
         
-        # Enable password authentication
-        $sshdConfig = "C:\ProgramData\ssh\sshd_config"
-        (Get-Content $sshdConfig) -replace '#PasswordAuthentication yes', 'PasswordAuthentication yes' | Set-Content $sshdConfig
-        (Get-Content $sshdConfig) -replace 'PasswordAuthentication no', 'PasswordAuthentication yes' | Set-Content $sshdConfig
+        # Set password for current user
+        $SecurePassword = ConvertTo-SecureString $password -AsPlainText -Force
+        Set-LocalUser -Name $env:USERNAME -Password $SecurePassword
+        
+        # Store password in file and as output
+        $password | Out-File -FilePath "$env:TEMP\ssh_password.txt"
+        echo "SSH_PASSWORD=$password" >> $env:GITHUB_ENV
+        
+        # Enable password authentication in SSH config
+        Write-Host "Configuring SSH settings..." -ForegroundColor Green
+        $sshdConfigPath = "C:\ProgramData\ssh\sshd_config"
+        
+        # Backup original config
+        Copy-Item $sshdConfigPath "$sshdConfigPath.bak"
+        
+        # Read config, modify and write back
+        $config = Get-Content $sshdConfigPath
+        $config = $config -replace '^#PasswordAuthentication yes', 'PasswordAuthentication yes'
+        $config = $config -replace '^PasswordAuthentication no', 'PasswordAuthentication yes'
+        $config | Set-Content $sshdConfigPath
         
         # Restart SSH service
         Restart-Service sshd
+        Write-Host "SSH service restarted" -ForegroundColor Green
     
     - name: Get Connection Info
       shell: powershell
       run: |
-        $ip = (Invoke-RestMethod -Uri "https://api.ipify.org").Trim()
-        echo "=========================================="
-        echo "SSH SERVER READY"
-        echo "=========================================="
-        echo "IP Address: $ip"
-        echo "Port: 22"
-        echo "Username: $env:USERNAME"
-        echo "Password: YourPassword123! (change this!)"
-        echo ""
-        echo "Connect with: ssh $env:USERNAME@$ip"
-        echo "=========================================="
+        # Get public IP
+        try {
+          $ip = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 10).Trim()
+        } catch {
+          $ip = "Unable to get public IP (check https://api.ipify.org manually)"
+        }
         
-        # Keep runner alive (this will run for the job duration)
-        echo "SSH server running. Job will stay active for up to 6 hours."
+        # Get local IPs for reference
+        $localIPs = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notlike "*Loopback*"}).IPAddress
+        
+        Write-Host "==========================================" -ForegroundColor Cyan
+        Write-Host "✅ SSH SERVER IS READY!" -ForegroundColor Green
+        Write-Host "==========================================" -ForegroundColor Cyan
+        Write-Host "📡 Public IP: $ip" -ForegroundColor Yellow
+        Write-Host "🔌 Port: 22" -ForegroundColor Yellow
+        Write-Host "👤 Username: $env:USERNAME" -ForegroundColor Yellow
+        Write-Host "🔑 Password: $env:SSH_PASSWORD" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "📋 Connection command:" -ForegroundColor White
+        Write-Host "ssh $env:USERNAME@$ip" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "📋 Local IPs (for internal network):" -ForegroundColor White
+        $localIPs | ForEach-Object { Write-Host "   $_" -ForegroundColor Gray }
+        Write-Host ""
+        Write-Host "⚠️  This runner will stay active for 6 hours max" -ForegroundColor Red
+        Write-Host "==========================================" -ForegroundColor Cyan
+        
+        # Save info to file
+        @"
+SSH Server Information
+=====================
+Public IP: $ip
+Port: 22
+Username: $env:USERNAME
+Password: $env:SSH_PASSWORD
+Connection: ssh $env:USERNAME@$ip
+"@ | Out-File -FilePath "$env:TEMP\ssh_info.txt"
     
-    - name: Keep Alive
+    - name: Keep Runner Alive
       shell: powershell
       run: |
-        # This keeps the runner active
+        Write-Host "🔄 SSH server is running. Job will stay active for up to 6 hours." -ForegroundColor Yellow
+        Write-Host "📝 Password is saved in: $env:TEMP\ssh_info.txt" -ForegroundColor Yellow
+        Write-Host "💡 To stop early, cancel this workflow in GitHub Actions UI" -ForegroundColor Yellow
+        Write-Host ""
+        
+        $counter = 0
         while ($true) {
-          Start-Sleep -Seconds 3600
-          Get-Date
+          $counter++
+          Write-Host "[$(Get-Date -Format 'HH:mm:ss')] SSH server active - Uptime: ${counter}h" -ForegroundColor Green
+          Start-Sleep -Seconds 3600  # Wait 1 hour between updates
         }
