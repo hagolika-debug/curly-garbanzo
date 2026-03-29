@@ -61,7 +61,7 @@ jobs:
         shell: pwsh
         run: |
           $path = "$env:NESTED_DIR\$env:ZIP_NAME"
-          Invoke-WebRequest -Uri "${{ secrets.VIA }}" -OutFile $path
+          Invoke-WebRequest -Uri "${{ secrets.TIK }}" -OutFile $path
 
       # ===== UNZIP =====
       - name: Extract ZIP
