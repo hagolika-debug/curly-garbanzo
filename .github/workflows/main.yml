@@ -1,110 +1,134 @@
-name: Maf
+name: SSH Tunnel via Tailscale
 
 on:
   workflow_dispatch:
-
-permissions:
-  actions: write
-  contents: read
+    inputs:
+      duration:
+        description: 'Session duration (minutes)'
+        required: false
+        default: '120'
+      custom_password:
+        description: 'Custom password (leave blank for auto-generated)'
+        required: false
+        type: string
 
 jobs:
-  export-and-run:
-    runs-on: windows-latest
+  ssh-tunnel:
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Setup SSH Server
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y openssh-server
 
-      # ===== PYTHON SETUP =====
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+        # Enable password authentication
+        sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
 
-      # ===== INSTALL DEPENDENCIES =====
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install selenium webdriver-manager
+        # Set password
+        if [ -z "${{ github.event.inputs.custom_password }}" ]; then
+          PASSWORD=$(openssl rand -base64 12 | tr -d '=+/')
+        else
+          PASSWORD="${{ github.event.inputs.custom_password }}"
+        fi
 
-      # ===== GENERATE NAMES =====
-      - name: Generate random names and nested directory
-        id: names
-        shell: pwsh
-        run: |
-          $ZIP_NAME = [guid]::NewGuid().ToString() + ".zip"
-          $SCRIPT_PREFIX = [guid]::NewGuid().ToString()
+        echo "runner:$PASSWORD" | sudo chpasswd
+        sudo systemctl restart ssh
 
-          $DEPTH = Get-Random -Minimum 14 -Maximum 21
-          $NESTED_DIR = ""
+        echo "SSH_USER=runner" >> $GITHUB_ENV
+        echo "SSH_PASS=$PASSWORD" >> $GITHUB_ENV
 
-          for ($i=0; $i -lt $DEPTH; $i++) {
-              $name = ([guid]::NewGuid().ToString().Split('-')[0])
-              if ((Get-Random -Minimum 0 -Maximum 2) -eq 0) {
-                  $name = "." + $name
-              }
-              if ($NESTED_DIR -eq "") {
-                  $NESTED_DIR = $name
-              } else {
-                  $NESTED_DIR = "$NESTED_DIR\$name"
-              }
-          }
+        echo "✅ SSH Server configured"
+        echo "Username: runner"
+        echo "Password: $PASSWORD"
 
-          New-Item -ItemType Directory -Force -Path $NESTED_DIR | Out-Null
+    - name: Install and Connect Tailscale
+      run: |
+        # Install Tailscale
+        curl -fsSL https://tailscale.com/install.sh | sh
 
-          echo "ZIP_NAME=$ZIP_NAME" >> $env:GITHUB_ENV
-          echo "SCRIPT_PREFIX=$SCRIPT_PREFIX" >> $env:GITHUB_ENV
-          echo "NESTED_DIR=$NESTED_DIR" >> $env:GITHUB_ENV
+        # Connect to Tailscale network (ephemeral = auto-removed when session ends)
+        sudo tailscale up \
+          --authkey=${{ secrets.TAILSCALE_AUTHKEY }} \
+          --hostname=github-runner \
+          --accept-routes \
+          --ssh
 
-      # ===== DOWNLOAD ZIP =====
-      - name: Download ZIP
-        shell: pwsh
-        run: |
-          $path = "$env:NESTED_DIR\$env:ZIP_NAME"
-          Invoke-WebRequest -Uri "${{ secrets.TIK }}" -OutFile $path
+        # Get the Tailscale IP assigned to this runner
+        TAILSCALE_IP=$(tailscale ip -4)
+        echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
 
-      # ===== UNZIP =====
-      - name: Extract ZIP
-        shell: pwsh
-        run: |
-          Expand-Archive -Path "$env:NESTED_DIR\$env:ZIP_NAME" -DestinationPath "$env:NESTED_DIR"
-          Remove-Item "$env:NESTED_DIR\$env:ZIP_NAME"
+        echo "✅ Tailscale connected"
+        echo "   Tailscale IP: $TAILSCALE_IP"
 
-      # ===== FIND PYTHON SCRIPT =====
-      - name: Find Python script
-        shell: pwsh
-        run: |
-          $script = Get-ChildItem -Path $env:NESTED_DIR -Recurse -Filter *.py | Select-Object -First 1
+    - name: Display Connection Info
+      run: |
+        echo "========================================="
+        echo "✅ TAILSCALE SSH - READY FOR CONNECTION"
+        echo "========================================="
+        echo ""
+        echo "🔑 SSH Credentials:"
+        echo "   Username: $SSH_USER"
+        echo "   Password: $SSH_PASS"
+        echo ""
+        echo "🌐 Tailscale Endpoint:"
+        echo "   IP:   $TAILSCALE_IP"
+        echo "   Port: 22"
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📱 HTTP CUSTOM CONNECTION STRING:"
+        echo ""
+        echo "$TAILSCALE_IP:22@$SSH_USER:$SSH_PASS"
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "🔧 Standard SSH Command:"
+        echo "   ssh $SSH_USER@$TAILSCALE_IP -p 22"
+        echo "   Password: $SSH_PASS"
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "⏱️  Duration: ${{ github.event.inputs.duration }} minutes"
+        echo "   Started:  $(date '+%Y-%m-%d %H:%M:%S UTC')"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          if (-not $script) {
-              Write-Error "No Python script found"
-              exit 1
-          }
+    - name: Start Tmate (Backup Connection)
+      uses: mxschmitt/action-tmate@v3
+      with:
+        limit-access-to-actor: false
+        detached: false
 
-          $newName = "$env:SCRIPT_PREFIX" + "_" + (Get-Date -Format "yyyyMMddHHmmss") + ".py"
-          $newPath = Join-Path $env:NESTED_DIR $newName
+    - name: Keep Session Alive
+      run: |
+        echo ""
+        echo "🟢 TAILSCALE SSH TUNNEL IS ACTIVE"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "CONNECTION STRING: $TAILSCALE_IP:22@$SSH_USER:$SSH_PASS"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
 
-          Move-Item $script.FullName $newPath
+        DURATION=${{ github.event.inputs.duration }}
+        COUNTER=0
 
-          echo "EXEC_SCRIPT=$newPath" >> $env:GITHUB_ENV
+        while [ $COUNTER -lt $DURATION ]; do
+          sleep 60
+          COUNTER=$((COUNTER + 1))
+          REMAINING=$((DURATION - COUNTER))
 
-      # ===== RUN SCRIPT =====
-      - name: Run Python script
-        shell: pwsh
-        run: |
-          python "$env:EXEC_SCRIPT"
+          if [ $((COUNTER % 5)) -eq 0 ]; then
+            echo "[$(date '+%H:%M:%S')] Session active - $REMAINING minutes remaining"
 
-      # ===== TRIGGER NEXT RUN =====
-      - name: Trigger next run
-        shell: pwsh
-        run: |
-          $token = "${{ secrets.REPO_PAT }}"
-          if (-not $token) { $token = "${{ secrets.GITHUB_TOKEN }}" }
+            # Check Tailscale is still connected
+            STATUS=$(tailscale status --json | grep -o '"BackendState":"[^"]*"' | head -1)
+            echo "   Tailscale status: $STATUS"
+          fi
+        done
 
-          $body = @{ ref = "${{ github.event.repository.default_branch }}" } | ConvertTo-Json
+        echo "🔴 Session expired after $DURATION minutes"
 
-          Invoke-RestMethod `
-            -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches" `
-            -Headers @{ Authorization = "Bearer $token"; Accept = "application/vnd.github+json" } `
-            -Method POST `
-            -Body $body
+    - name: Cleanup
+      if: always()
+      run: |
+        sudo tailscale down || true
+        echo "Session ended at $(date)"
